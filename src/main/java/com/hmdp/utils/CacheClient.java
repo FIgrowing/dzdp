@@ -1,52 +1,69 @@
-package com.hmdp.service.impl;
+package com.hmdp.utils;
 
 import cn.hutool.core.util.RandomUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
-import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
-import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.hmdp.utils.CacheClient;
-import com.hmdp.utils.RedisConstants;
+import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RTimeSeries;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.stereotype.Service;
+import org.springframework.stereotype.Component;
 
 import javax.annotation.Resource;
+
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
-/**
- * <p>
- *  服务实现类
- * </p>
- *
- * @author 虎哥
- * @since 2021-12-22
- */
-@Service
-public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IShopService {
-
-    @Resource
-    private CacheClient cacheClient;
-
-
+@Slf4j
+@Component
+public class CacheClient {
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private IShopService iShopService;
 
-    @Override
-    public Result queryById(Long id) {
+    public void set(String key, Object value, Long time, TimeUnit unit) {
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), time, unit);
+    }
 
-        Shop shop =null;
 
-        String key = "cache:shop:"+id;
+    public <R,ID> R querryCacheWithPassThrough(String prefix, ID id, Class<R> type, Function<ID, R> dbFallBack,Long time, TimeUnit unit)
+    {
+        R r =null;
+        String key = prefix+id;
         // 从redis中查询缓存
         String shopJson = stringRedisTemplate.opsForValue().get(key);
         // 存在则直接返回
         if (StrUtil.isNotBlank(shopJson))
         {
-            shop = JSONUtil.toBean(shopJson, Shop.class);
-            return Result.ok(shop);
+            r = JSONUtil.toBean(shopJson, type);
+            return r;
+        }
+
+        r = dbFallBack.apply(id);
+        if (r==null)
+        {
+            stringRedisTemplate.opsForValue().set(key,"", time, unit);
+            return null;
+        }
+        stringRedisTemplate.opsForValue().set(key,JSONUtil.toJsonStr(r), time,unit);
+        return r;
+    }
+
+    public <R,ID> R queryBySafe(String prefix, ID id, Class<R> type, Function<ID,R> dbFallBack, Long time, TimeUnit unit) {
+
+        R r =null;
+
+        String key = prefix+id;
+        // 从redis中查询缓存
+        String shopJson = stringRedisTemplate.opsForValue().get(key);
+        // 存在则直接返回
+        if (StrUtil.isNotBlank(shopJson))
+        {
+            r = JSONUtil.toBean(shopJson, type);
+            return r;
         }
 
         String lockKey = "cache:lock:"+id;
@@ -58,20 +75,20 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
                 String flag = stringRedisTemplate.opsForValue().get(key);
                 if (StrUtil.isNotBlank(flag))
                 {
-                   break;
+                    break;
                 }
                 // 不存在则查询数据库
-                shop = query().eq("id", id).one();
+                r = dbFallBack.apply(id);
                 // 数据库也不存在则直接返回
-                if (shop==null)
+                if (r==null)
                 {
                     //todo 如果数据库也没有则在redis中写入null值,减少缓存穿透
                     stringRedisTemplate.opsForValue().set(key,"", RedisConstants.CACHE_NULL_TTL, TimeUnit.MINUTES);
-                    return Result.fail("店铺不存在");
+                    return null;
                 }
                 int randomExTime = RandomUtil.randomInt(0, 24);
                 // todo 数据库存在则回写redis，并且设置一个随机过期时间，防止缓存雪崩
-                stringRedisTemplate.opsForValue().set(key,JSONUtil.toJsonStr(shop),randomExTime,TimeUnit.HOURS);
+                stringRedisTemplate.opsForValue().set(key,JSONUtil.toJsonStr(r),time,unit);
             }
         } catch (Exception e) {
             throw new RuntimeException(e);
@@ -79,16 +96,8 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             // todo 无论是否出现异常都要释放锁
             unLock(lockKey);
         }
-        return Result.ok(shop);
+        return r;
     }
-
-//    public Result query(Long id)
-//    {
-//
-//        Shop shop = cacheClient.queryBySafe("cache:shop:", id, Shop.class, id2 -> getById(id2), 100, TimeUnit.SECONDS);
-//        return Result.ok(shop);
-//    }
-
 
     private Boolean tryLock(String key)
     {
@@ -99,4 +108,5 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     {
         stringRedisTemplate.delete(key);
     }
+
 }
