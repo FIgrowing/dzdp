@@ -12,6 +12,7 @@ import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisConstants;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 import java.util.concurrent.TimeUnit;
@@ -80,6 +81,21 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             unLock(lockKey);
         }
         return Result.ok(shop);
+    }
+
+    @Override
+    @Transactional
+    public Result updateShop(Shop shop) {
+        Long id = shop.getId();
+        if (id==null)
+        {
+            return Result.fail("店铺id不能为空");
+        }
+        // 先更新数据库
+        updateById(shop);
+        // 再删除缓存
+        stringRedisTemplate.delete("cache:shop:"+id);
+        return Result.ok();
     }
 
 //    public Result query(Long id)
